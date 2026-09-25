@@ -268,17 +268,28 @@ const ENG = (() => {
   }
   // phương án đường bao không khép kín: kéo diện truyền tải ra các mép đài gần (Hình 6, 7 TCVN – bài báo Lê Minh Long; Hình 6.15 EC2)
   function edgeHulls(hull, cap, lim) {
-    const out = [{ name: 'khép kín', h: hull }];
+    const out = [{ name: 'khép kín', h: hull, edges: [] }];
     const near = [];
     cap.edges.filter(e => hull.some(p => distSeg(p, e.a, e.b) <= lim)).forEach(e => { // gộp các cạnh trùng đường thẳng (vùng pit nằm sát biên)
       const c = e.n[0] * e.a[0] + e.n[1] * e.a[1]; if (!near.some(f => Math.abs(f.n[0] - e.n[0]) < 1e-6 && Math.abs(f.n[1] - e.n[1]) < 1e-6 && Math.abs(f.n[0] * f.a[0] + f.n[1] * f.a[1] - c) < 1e-6)) near.push(e); });
     const proj = (e, push) => hull.map(p => { const dx = e.b[0] - e.a[0], dy = e.b[1] - e.a[1], L2 = dx * dx + dy * dy; const t = ((p[0] - e.a[0]) * dx + (p[1] - e.a[1]) * dy) / L2; return [e.a[0] + t * dx + e.n[0] * push, e.a[1] + t * dy + e.n[1] * push]; });
     near.forEach((e, i) => {
-      out.push({ name: 'không khép kín (1 mép)', h: G.hull(hull.concat(proj(e, 3))) });
+      out.push({ name: 'không khép kín (1 mép)', h: G.hull(hull.concat(proj(e, 3))), edges: [e] });
       near.forEach((f, j) => { if (j <= i) return; const nd = e.n[0] * f.n[0] + e.n[1] * f.n[1]; if (Math.abs(nd) > 0.5) return; // 2 mép cắt nhau → góc
-        out.push({ name: 'không khép kín (góc)', h: G.hull(hull.concat(proj(e, 3), proj(f, 3), proj(e, 3).map(p => [p[0] + f.n[0] * 30, p[1] + f.n[1] * 30]))) }); });
+        // giao điểm 2 đường mép (góc thật của đài, kể cả cạnh xiên), đẩy ra ngoài
+        const d1 = [e.b[0] - e.a[0], e.b[1] - e.a[1]], d2 = [f.b[0] - f.a[0], f.b[1] - f.a[1]], den = d1[0] * d2[1] - d1[1] * d2[0]; if (Math.abs(den) < 1e-9) return;
+        const t = ((f.a[0] - e.a[0]) * d2[1] - (f.a[1] - e.a[1]) * d2[0]) / den, X = [e.a[0] + t * d1[0], e.a[1] + t * d1[1]];
+        const push = [(e.n[0] + f.n[0]) * 3, (e.n[1] + f.n[1]) * 3];
+        out.push({ name: 'không khép kín (góc)', h: G.hull(hull.concat(proj(e, 3), proj(f, 3), [[X[0] + push[0], X[1] + push[1]]])), edges: [e, f] }); });
     });
     return out;
+  }
+  // đường bao hợp lệ: phần nằm ngoài đài chỉ được vượt qua các mép đã chọn (đường bao không khép kín đi thẳng ra mép đó)
+  function validOpt(poly, cap, edges) {
+    for (const [a, b] of G.segments(poly)) { const L = Math.hypot(b[0] - a[0], b[1] - a[1]), n = Math.max(1, Math.ceil(L / 0.05));
+      for (let k = 0; k < n; k++) { const m = [a[0] + (b[0] - a[0]) * (k + 0.5) / n, a[1] + (b[1] - a[1]) * (k + 0.5) / n]; if (cap.inCap(m)) continue;
+        if (!edges.some(e => e.n[0] * (m[0] - e.a[0]) + e.n[1] * (m[1] - e.a[1]) > -1e-6)) return false; } }
+    return true;
   }
   function distSeg(p, a, b) { const dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy || 1e-12; let t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2; t = Math.max(0, Math.min(1, t)); return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy); }
   const polyLen = p => G.segments(p).reduce((s, [a, b]) => s + Math.hypot(b[0] - a[0], b[1] - a[1]), 0);
@@ -344,7 +355,7 @@ const ENG = (() => {
       const a = 2 * dRef * i / nStep; // mm
       let poly = null, per = null, optName = '';
       const hulls = edgeHulls(hull, o.cap, a / 1000); // 6.4.2(4): chỉ xét chu vi ra mép khi chu vi khép kín cắt qua mép
-      for (const eh of hulls) { const pl = G.offset(eh.h, a / 1000, true), pr = perimeter(pl, o.cap); if (pr.u <= 0) continue; if (!per || pr.Ad < per.Ad) { per = pr; poly = pl; optName = eh.name; } }
+      for (const eh of hulls) { const pl = G.offset(eh.h, a / 1000, true); if (!validOpt(pl, o.cap, eh.edges)) continue; const pr = perimeter(pl, o.cap); if (pr.u <= 0) continue; if (!per || pr.Ad < per.Ad) { per = pr; poly = pl; optName = eh.name; } }
       if (!per) { stopA = a; break; }
       const polyIn = G.offset(hull, a / 1000, true);
       // stop when the control perimeter starts to shrink: the failure surface has left the cap edges (one-way shear, not punching)
@@ -364,27 +375,27 @@ const ENG = (() => {
       let vRdcs = null;
       if (o.links && o.links.on) { const fyef = Math.min(250 + 0.25 * d, o.links.fywd); vRdcs = Math.min(0.75 * vRd + 1.5 * o.links.rhoW * fyef, vRdmax); }
       const cap_ = vRdcs != null ? Math.max(vRd, vRdcs) : vRd;
-      const r = { a, opt: optName, u: per.u, d, dV, Wt, Vred, beta, vEd, vRd, vRdcs, ratio: vEd / cap_, ratioNoLinks: vEd / vRd, poly };
+      const r = { a, opt: optName, segs: per.segs, per: { cx: per.cx, cy: per.cy, Wx: per.Wx, Wy: per.Wy, u: per.u }, rc, u: per.u, d, dV, Wt, Vred, beta, vEd, vRd, vRdcs, ratio: vEd / cap_, ratioNoLinks: vEd / vRd, poly };
       scan.push(r); if (!crit || r.ratio > crit.ratio) crit = r;
     }
     // cốt thép chống chọc thủng: kiểm tra chu vi ngoài u_out cách hàng thép ngoài cùng 1,5d (6.4.5(4)), chỉ bê tông chịu
     let out = null;
     if (o.links && o.links.on && crit && crit.ratioNoLinks > 1) {
       const aOut = (o.links.extK || 1.5) * dRef + 1.5 * dRef; let best = null;
-      for (const eh of edgeHulls(hull, o.cap, aOut / 1000)) { const pl = G.offset(eh.h, aOut / 1000, true), pr = perimeter(pl, o.cap); if (pr.u > 0 && (!best || pr.Ad < best.per.Ad)) best = { per: pr, poly: pl }; }
+      for (const eh of edgeHulls(hull, o.cap, aOut / 1000)) { const pl = G.offset(eh.h, aOut / 1000, true); if (!validOpt(pl, o.cap, eh.edges)) continue; const pr = perimeter(pl, o.cap); if (pr.u > 0 && (!best || pr.Ad < best.per.Ad)) best = { per: pr, poly: pl }; }
       if (best) {
         const polyIn = G.offset(hull, aOut / 1000, true); let dV = 0;
         if (o.reduce) o.piles.forEach((p, j) => { const f = fracInside(p, o.pileShape, o.pileD, polyIn); if (f > 0) dV += f * o.R[j]; });
         const Vr = V - (dV - (o.reduce ? o.wArea * Math.abs(G.area(polyIn)) : 0)), d = best.per.d, rc = ec2vRdc(d, o.rhoFn ? o.rhoFn(d) : o.rho, o.fck, o.gc);
         const vRd = rc.v * (o.enhance && aOut < 2 * d ? 2 * d / aOut : 1), vEd = Vr > 0 ? betaAt(best.per, Vr) * Vr * 1000 / best.per.Ad : 0;
-        out = { a: aOut, u: best.per.u, vEd, vRd, ratio: vEd / vRd, poly: best.poly };
+        out = { a: aOut, u: best.per.u, vEd, vRd, ratio: vEd / vRd, poly: best.poly, segs: best.per.segs };
       } else out = { a: aOut, u: 0, vEd: 0, vRd: 0, ratio: 0, note: 'u_out ra ngoài đài' };
     }
     // u0 check: β taken as the largest β found on the valid control perimeters (u1 may lie outside a small cap)
     const betaU0 = Math.max(per2d.u > 0 ? beta1 : 1, ...scan.map(r => betaAt(perimeter(r.poly, o.cap), V)));
     const vEd0b = per0.Ad > 0 ? betaU0 * V * 1000 / per0.Ad : 0;
     const ratio0 = vEd0b / vRdmax;
-    return { hull, out, u0: per0.u, vEd0: vEd0b, betaU0, vRdmax, ratio0, beta: crit ? crit.beta : beta1, u1: per2d.u, d: dRef, scan, crit, stopA, ratio: Math.max(ratio0, crit ? crit.ratio : 0, out ? out.ratio : 0), needLinks: crit && crit.ratioNoLinks > 1 };
+    return { hull, lc, c1x, c2y, fck: o.fck, gc: o.gc, out, u0: per0.u, vEd0: vEd0b, betaU0, vRdmax, ratio0, beta: crit ? crit.beta : beta1, u1: per2d.u, d: dRef, scan, crit, stopA, ratio: Math.max(ratio0, crit ? crit.ratio : 0, out ? out.ratio : 0), needLinks: crit && crit.ratioNoLinks > 1 };
   }
   const bbox = p => [Math.min(...p.map(q => q[0])), Math.min(...p.map(q => q[1])), Math.max(...p.map(q => q[0])), Math.max(...p.map(q => q[1]))];
 
@@ -404,9 +415,10 @@ const ENG = (() => {
     const F = F0 - (dV - Wt);
     const cand = [];
     for (const eh of edgeHulls(hull, o.cap, h0 / 1000)) { // 8.1.6.2: diện truyền tải ở biên/góc (mép nằm trong đáy tháp, ≤ h0)
-      const poly = G.offset(eh.h, h0 / 2000, false), per = perimeter(poly, o.cap);
-      if (per.u > 0) cand.push({ name: eh.name === 'khép kín' ? (per.closed ? 'Đường bao khép kín' : 'Đường bao cắt theo mép đài') : 'Đường bao ' + eh.name, per, poly });
+      const poly = G.offset(eh.h, h0 / 2000, false); if (!validOpt(poly, o.cap, eh.edges)) continue; const per = perimeter(poly, o.cap);
+      if (per.u > 0) cand.push({ name: 'Đường bao ' + eh.name, per, poly });
     }
+    if (!cand.length) return { hull, h0, F, dV, Wt, pilesIn, options: [], crit: { u: 0, ratio: 0, name: 'Không có đường bao hợp lệ' }, out: null, ratio: 0, na: true };
     const res = cand.map(c => evalTCVN(c.per, F, M, lc, Rbt, o));
     let worst = 0; res.forEach((r, i) => { r.name = cand[i].name; r.poly = cand[i].poly; if (r.ratio > res[worst].ratio) worst = i; });
     // có cốt thép ngang: tiết diện thứ hai cách hàng cốt thép ngoài cùng h0/2, chỉ bê tông chịu (8.1.6.3)
@@ -415,7 +427,7 @@ const ENG = (() => {
       const ext = (o.links.extK || 1.5) * h0, base2 = G.offset(hull, (ext + h0) / 1000, false); let dV2 = 0, W2 = 0;
       if (o.reduce) { o.piles.forEach((p, j) => { if (G.inside([p.x, p.y], base2)) dV2 += o.R[j]; }); W2 = o.wArea * Math.abs(G.area(base2)); }
       const F2 = F0 - (dV2 - W2); let bestO = null;
-      for (const eh of edgeHulls(hull, o.cap, (ext + h0) / 1000)) { const poly = G.offset(eh.h, (ext + h0 / 2) / 1000, false), per = perimeter(poly, o.cap); if (per.u <= 0) continue;
+      for (const eh of edgeHulls(hull, o.cap, (ext + h0) / 1000)) { const poly = G.offset(eh.h, (ext + h0 / 2) / 1000, false); if (!validOpt(poly, o.cap, eh.edges)) continue; const per = perimeter(poly, o.cap); if (per.u <= 0) continue;
         const r = evalTCVN(per, F2, M, lc, Rbt, { ...o, links: { on: false } }); r.poly = poly; if (!bestO || r.ratio > bestO.ratio) bestO = r; }
       out = bestO ? { ...bestO, F: F2, ext } : null;
     }
@@ -429,8 +441,10 @@ const ENG = (() => {
     const Wbx = per.xmax > 0 ? per.Ix / per.xmax : 0, Wby = per.ymax > 0 ? per.Iy / per.ymax : 0; // mm2
     const Mbxu = Rbt * Wbx * h0 / 1e6, Mbyu = Rbt * Wby * h0 / 1e6; // kNm (bending in X-direction uses Wbx)
     // moments taken into account: factor·M_col + F·eccentricity (load centroid vs contour centroid)
-    const Mx = Math.abs(o.mFactor * (M.My || 0) + (F > 0 ? F : 0) * (lc[0] - per.cx)); // acts along X
-    const My = Math.abs(o.mFactor * (M.Mx || 0) + (F > 0 ? F : 0) * (lc[1] - per.cy)); // acts along Y
+    const ex = (lc[0] - per.cx), ey = (lc[1] - per.cy); // độ lệch tâm diện truyền tải so với trọng tâm đường bao (m)
+    const MxCol = o.mFactor * (M.My || 0), MyCol = o.mFactor * (M.Mx || 0), MxFe = (F > 0 ? F : 0) * ex, MyFe = (F > 0 ? F : 0) * ey;
+    const Mx = Math.abs(MxCol + MxFe); // theo phương X (quanh trục Y)
+    const My = Math.abs(MyCol + MyFe); // theo phương Y (quanh trục X)
     let Fsw = 0, Msx = 0, Msy = 0, linksUsed = false;
     if (o.links && o.links.on) {
       const qsw = o.Rsw * o.links.Aleg * h0 / (o.links.sx * o.links.sy); // N/mm
@@ -441,7 +455,8 @@ const ENG = (() => {
     const rF = F > 0 ? F / FuT : 0;
     let rM = (MxuT > 0 ? Mx / MxuT : 0) + (MyuT > 0 ? My / MyuT : 0);
     rM = Math.min(rM, 0.5 * rF); // 8.1.6.1: M/Mu ≤ 0.5·F/Fu
-    return { u: per.u, h0, Fbu, Fsw, linksUsed, Mbxu, Mbyu, Mx, My, rF, rM, ratio: rF + rM, per };
+    const rMraw = (MxuT > 0 ? Mx / MxuT : 0) + (MyuT > 0 ? My / MyuT : 0);
+    return { u: per.u, h0, Fbu, Fsw, linksUsed, Mbxu, Mbyu, MxuT, MyuT, FuT, Wbx, Wby, Ix: per.Ix, Iy: per.Iy, xmax: per.xmax, ymax: per.ymax, cx: per.cx, cy: per.cy, ex, ey, MxCol, MyCol, MxFe, MyFe, Mx, My, rF, rM, rMraw, F, ratio: rF + rM, per };
   }
 
   // ---------- tháp chọc thủng từ mép cột tới mép trong cọc (phương pháp truyền thống cho đài cọc) ----------
@@ -670,7 +685,7 @@ function defState() {
   return {
     v: 1, name: 'Đài cọc PC1', std: 'EC2',
     ec2: { cls: 'C30/37', gc: 1.5, fyk: 500, fywk: 500, gs: 1.15, kmax: 0.4, gG: 1.35 },
-    tcvn: { B: 'B30', steel: 'CB400-V', stir: 'CB300-V', gb1: 1.0, gG: 1.1, mFactor: 0.5 },
+    tcvn: { B: 'B30', steel: 'CB400-V', stir: 'CB300-V', gb1: 1.0, gG: 1.1, mFactor: 1.0, mFv: 2 },
     rb: { cover: 100, botX: { dia: 25, s: 150 }, botY: { dia: 25, s: 150 }, topX: { dia: 16, s: 200 }, topY: { dia: 16, s: 200 }, links: { on: false, dia: 12, sx: 200, sy: 200, extK: 1.5 }, topCover: 50, hookBot: true, side: { on: true, dia: 14, s: 250 }, chair: { on: true, dia: 16, s: 1000 } },
     gammaC: 25, soilT: 0, gammaS: 18,
     pile: { shape: 'circle', D: 0.6, Rc: 3500, Rt: 0, E: 32500 },
@@ -686,7 +701,7 @@ let S = load() || sample9();
 let tab = 'geo', mode = 'select', sel = null, draft = [], cursor = null, punchRes = null, punchSel = null, settleRes = null;
 const view = { cx: 0, cy: 0, s: 60 };
 
-function load() { try { const t = localStorage.getItem(KEY); if (!t) return null; return merge(defState(), JSON.parse(t)); } catch (e) { return null; } }
+function load() { try { const t = localStorage.getItem(KEY); if (!t) return null; const st = merge(defState(), JSON.parse(t)); if (st.tcvn.mFv !== 2) { st.tcvn.mFactor = 1.0; st.tcvn.mFv = 2; } return st; } catch (e) { return null; } }
 function merge(a, b) { if (Array.isArray(b)) return b; if (b && typeof b === 'object') { const o = { ...a }; for (const k in b) o[k] = (a && typeof a[k] === 'object' && !Array.isArray(a[k]) && a[k] !== null) ? merge(a[k], b[k]) : b[k]; return o; } return b; }
 let saveT; function save() { if (typeof dirty !== 'undefined') dirty = true; clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} }, 250); }
 function toast(t) { const e = $('#toast'); e.textContent = t; e.classList.add('on'); clearTimeout(e._t); e._t = setTimeout(() => e.classList.remove('on'), 2200); }
@@ -861,10 +876,10 @@ function draw() {
   // punching perimeter
   if (tab === 'punch' && punchSel) {
     const r = punchSel;
-    if (r.crit && r.crit.poly) o += `<polygon points="${pts2(r.crit.poly)}" fill="rgba(63,169,245,.07)" stroke="${r.std === 'EC2' ? '#3FA9F5' : '#E06FE0'}" stroke-width="2" stroke-dasharray="7 4"/>`;
+    const sg = critSegs(r); if (sg) segPaths(sg).forEach(P => o += `<polyline points="${pts2(P)}" fill="none" stroke="${r.std === 'EC2' ? '#3FA9F5' : '#E06FE0'}" stroke-width="2.2" stroke-dasharray="7 4"/>`); else if (r.crit && r.crit.poly) o += `<polygon points="${pts2(r.crit.poly)}" fill="rgba(63,169,245,.07)" stroke="${r.std === 'EC2' ? '#3FA9F5' : '#E06FE0'}" stroke-width="2" stroke-dasharray="7 4"/>`;
     if (r.hull) o += `<polygon points="${pts2(r.hull)}" fill="none" stroke="#FF9F43" stroke-width="2"/>`;
     if (r.line) o += `<polyline points="${pts2(r.line)}" stroke="#E06FE0" stroke-width="2" stroke-dasharray="8 4" fill="none"/>`;
-    if (r.res && r.res.out && r.res.out.poly) o += `<polygon points="${pts2(r.res.out.poly)}" fill="none" stroke="#9BE37F" stroke-width="1.6" stroke-dasharray="3 3"/>`;
+    const os = r.res && r.res.out && (r.res.out.segs || (r.res.out.per && r.res.out.per.segs)); if (os) segPaths(os).forEach(P => o += `<polyline points="${pts2(P)}" fill="none" stroke="#9BE37F" stroke-width="1.6" stroke-dasharray="3 3"/>`);
   }
   if (tab === 'rebar') o += drawRebarPlan();
   // piles
@@ -897,6 +912,9 @@ function draw() {
   if (cursor) { const [sx, sy] = toS(cursor[0], cursor[1]); o += `<g stroke="${cursor[2] ? '#FFDD57' : '#8FA0A4'}" stroke-width="1"><line x1="${sx - 9}" y1="${sy}" x2="${sx + 9}" y2="${sy}"/><line x1="${sx}" y1="${sy - 9}" x2="${sx}" y2="${sy + 9}"/>${cursor[2] ? `<rect x="${sx - 5}" y="${sy - 5}" width="10" height="10" fill="none"/>` : ''}</g>`; }
   svg.innerHTML = o;
 }
+function segPaths(segs) { const out = []; let cur = null; (segs || []).forEach(([p, q]) => { if (cur && Math.hypot(cur[cur.length - 1][0] - p[0], cur[cur.length - 1][1] - p[1]) < 1e-6) cur.push(q); else { cur = [p, q]; out.push(cur); } });
+  if (out.length > 1) { const f = out[0], l = out[out.length - 1]; if (Math.hypot(f[0][0] - l[l.length - 1][0], f[0][1] - l[l.length - 1][1]) < 1e-6) { out[0] = l.concat(f.slice(1)); out.pop(); } } return out; }
+function critSegs(r) { if (!r) return null; if (r.crit && r.crit.per && r.crit.per.segs) return r.crit.per.segs; if (r.crit && r.crit.segs) return r.crit.segs; return null; }
 function niceStep(v) { const p = Math.pow(10, Math.floor(Math.log10(v))), n = v / p; return (n < 1.5 ? 1 : n < 3.5 ? 2 : n < 7.5 ? 5 : 10) * p; }
 
 let drag = null;
@@ -1069,8 +1087,8 @@ PANELS.mat = () => `<h2>Vật liệu, cốt thép, trọng lượng</h2>
   <div class="row"><span>Tiêu chuẩn kiểm tra chọc thủng</span><div class="sw"><button data-a="std" data-v="EC2" class="${S.std === 'EC2' ? 'on' : ''}">EN 1992-1-1</button><button data-a="std" data-v="TCVN" class="${S.std === 'TCVN' ? 'on' : ''}">TCVN 5574:2018</button></div></div>
   ${S.std === 'EC2' ? `<h3>Eurocode 2</h3><div class="grid3">${selF('ec2.cls', 'Cấp bê tông', Object.keys(EC2_C).map(k => [k, k]))}${num('ec2.gc', 'γc', 0.05)}${num('ec2.fyk', 'fyk thép dọc (MPa)', 10)}${num('ec2.fywk', 'fywk thép đai (MPa)', 10)}${num('ec2.gs', 'γs', 0.05)}${num('ec2.kmax', 'vRd,max = k·ν·fcd, k =', 0.05)}${num('ec2.gG', 'Hệ số tải TLBT đài (ULS)', 0.05)}</div>
     <p class="note">k = 0,5 theo EN 1992-1-1:2004 (bản mày gửi, 6.4.5(3)); sửa đổi A1:2014 hạ về 0,4. Mặc định 0,4 – thiên an toàn.</p>`
-    : `<h3>TCVN 5574:2018</h3><div class="grid3">${selF('tcvn.B', 'Cấp bê tông', Object.keys(ENG.TCVN_B).map(k => [k, k]))}${selF('tcvn.steel', 'Thép dọc', Object.keys(ENG.TCVN_S).map(k => [k, k]))}${selF('tcvn.stir', 'Thép đai / ngang', Object.keys(ENG.TCVN_S).map(k => [k, k]))}${num('tcvn.gb1', 'γb1 nhân Rbt', 0.05)}${num('tcvn.gG', 'Hệ số tải TLBT đài (ULS)', 0.05)}${num('tcvn.mFactor', 'Hệ số kể M cột vào chọc thủng', 0.05)}</div>
-    <p class="note">γb1 = 1,0 tải ngắn hạn; 0,9 tải dài hạn (6.1.2.3). Hệ số M = 0,5 theo 8.1.6.1 (một nửa mô men tập trung kể vào chọc thủng).</p>`}
+    : `<h3>TCVN 5574:2018</h3><div class="grid3">${selF('tcvn.B', 'Cấp bê tông', Object.keys(ENG.TCVN_B).map(k => [k, k]))}${selF('tcvn.steel', 'Thép dọc', Object.keys(ENG.TCVN_S).map(k => [k, k]))}${selF('tcvn.stir', 'Thép đai / ngang', Object.keys(ENG.TCVN_S).map(k => [k, k]))}${num('tcvn.gb1', 'γb1 nhân Rbt', 0.05)}${num('tcvn.gG', 'Hệ số tải TLBT đài (ULS)', 0.05)}${selF('tcvn.mFactor', 'Mô men cột kể vào chọc thủng', [[1, '1,0 – kể toàn bộ M (khuyến nghị cho đài)'], [0.5, '0,5 – M là Mloc nút cột–bản (8.1.6.1)']])}</div>
+    <p class="note">γb1 = 1,0 tải ngắn hạn; 0,9 tải dài hạn (6.1.2.3). Mô men: 8.1.6.1 cho phép kể một nửa Mloc (mô men tại nút cột–bản sàn, nửa kia do tiết diện thẳng góc của bản chịu). Với đài cọc, mô men chân cột truyền trọn vào đài → mặc định kể toàn bộ.</p>`}
   <h3>Cốt thép đài</h3>
   <div class="grid3">${num('rb.cover', 'Lớp BV tới mép thép lớp dưới (mm)', 5)}</div>
   <table class="t" style="margin-top:6px"><tr><th>Lớp</th><th>Φ (mm)</th><th>Bước (mm)</th><th>As (mm²/m)</th></tr>
@@ -1242,7 +1260,7 @@ PANELS.punch = () => {
   if (R.err) return head + `<p class="note">${R.err}</p>`;
   const worst = R.env[0];
   if (!punchSel && worst) punchSel = worst;
-  const rows = R.env.map(o => `<tr class="click ${punchSel && punchSel.obj === o.obj ? 'sel' : ''}" data-a="pSel" data-o="${esc(o.obj)}"><td>${esc(o.obj)}</td><td>${esc(o.combo)}</td><td class="num">${fx(o.N, 0)}</td><td class="num">${fx(o.ratio, 3)}</td><td><span class="tag ${o.ratio <= 1 ? 'ok' : 'ng'}">${o.ratio <= 1 ? 'Đạt' : 'Không đạt'}</span></td></tr>`).join('');
+  const rows = R.env.map(o => `<tr class="click ${punchSel && punchSel.obj === o.obj ? 'sel' : ''}" data-a="pSel" data-o="${esc(o.obj)}"><td>${esc(o.obj)}</td><td>${esc(o.combo)}</td><td class="num">${fx(o.N, 0)}</td><td class="num">${o.res && o.res.na ? '–' : fx(o.ratio, 3)}</td><td>${o.res && o.res.na ? '<span class="tag wr">Không áp dụng</span>' : `<span class="tag ${o.ratio <= 1 ? 'ok' : 'ng'}">${o.ratio <= 1 ? 'Đạt' : 'Không đạt'}</span>`}</td></tr>`).join('');
   return head + `<div class="stat"><div><small>Tỷ lệ lớn nhất</small><span class="big" style="color:${worst && worst.ratio > 1 ? 'var(--ng)' : 'var(--ok)'}">${worst ? fx(worst.ratio, 3) : '–'}</span></div><div><small>Tại</small><b>${worst ? esc(worst.obj) + ' · ' + esc(worst.combo) : '–'}</b></div><div><small>Số kiểm tra</small><b>${R.all.length}</b></div></div>
   <table class="t"><tr><th>Đối tượng</th><th>Tổ hợp bất lợi</th><th class="num">Lực (kN)</th><th class="num">Tỷ lệ</th><th></th></tr>${rows}</table>
   ${Object.keys(R.skipped).length ? `<p class="note">Không kiểm tra cọc chọc thủng ngược cho ${Object.keys(R.skipped).join(', ')}: cọc nằm trong ${S.std === 'EC2' ? 'phạm vi 2d tính từ mép' : 'đáy tháp chọc thủng (offset h₀) của'} cột/lõi, phản lực đã được trừ trong kiểm tra cột; truyền lực cột–cọc lúc này là thanh chống xiên, kiểm tra bằng cắt hoặc giàn ảo.</p>` : ''}
@@ -1251,60 +1269,75 @@ PANELS.punch = () => {
 };
 ACT.pSel = b => { punchSel = punchRes.env.find(o => o.obj === b.dataset.o); renderPanel(); draw(); };
 function detailHtml(o) {
-  const r = o.res;
-  if (o.kind === 'pyr') return `<h3>Chi tiết – ${esc(o.obj)}, ${esc(o.combo)}</h3><div class="kv">
-    <b>Nguồn</b><span>${S.opt.pyrVar === 'vn' ? 'Giáo trình Nền móng VN: P ≤ [α₁(b+c₂) + α₂(h+c₁)]·h₀·Rbt, α = 1,5√(1+(h₀/c)²)' : 'SNiP 2.03.01-84 (hướng dẫn thiết kế đài cọc): F ≤ 2Rbt·h₀·[(h₀/c₁)(b+c₂) + (h₀/c₂)(h+c₁)]'} – áp dụng mỗi mặt tháp riêng, 0,4h₀ ≤ c ≤ h₀</span>
-    <b>h₀</b><span>${fx(r.h0, 0)} mm</span>
-    <b>c tới mép trong cọc</b><span>+X ${fx(r.c.xp, 0)}; −X ${fx(r.c.xm, 0)}; +Y ${fx(r.c.yp, 0)}; −Y ${fx(r.c.ym, 0)} mm (c = h₀ khi không có cọc trong tháp 45°)</span>
-    <b>Từng mặt tháp</b><span>${r.faces.map(f => `${f.n}: k = ${fx(f.k, 3)}, w<sub>tb</sub> = ${fx(f.w, 0)} mm → ${fx(f.F, 0)} kN`).join('<br>')}</span>
-    <b>F</b><span>N − cọc dưới chân cột (ΣP = ${fx(r.dV, 0)}) = ${fx(r.F, 1)} kN</span>
-    <b>Fu</b><span>${fx(r.Fu, 1)} kN</span>
-    <b>Kết luận</b><span><span class="tag ${o.ratio <= 1 ? 'ok' : 'ng'}">${fx(o.ratio, 3)}</span></span></div>`;
+  const r = o.res, T = (k, v) => `<b>${k}</b><span>${v}</span>`, tag = x => `<span class="tag ${x <= 1 ? 'ok' : 'ng'}">${fx(x, 3)} → ${x <= 1 ? 'Đạt' : 'Không đạt'}</span>`;
+  const head = `<h3>Chi tiết – ${esc(o.obj)}, ${esc(o.combo)}</h3>`;
+  if (o.kind === 'pyr') return head + `<div class="kv">
+    ${T('Nguồn', S.opt.pyrVar === 'vn' ? 'Giáo trình Nền móng VN: P ≤ [α₁(b+c₂) + α₂(h+c₁)]·h₀·Rbt, α = 1,5√(1+(h₀/c)²)' : 'SNiP 2.03.01-84 (đài cọc): F ≤ 2Rbt·h₀·[(h₀/c₁)(b+c₂) + (h₀/c₂)(h+c₁)]')}
+    ${T('Áp dụng', 'mỗi mặt tháp: F<sub>mặt</sub> = Rbt·h₀·k(c)·w<sub>tb</sub>; w<sub>tb</sub> = cạnh cột + (c<sub>trái</sub> + c<sub>phải</sub>)/2; giới hạn 0,4h₀ ≤ c ≤ h₀')}
+    ${T('h₀', fx(r.h0, 0) + ' mm')}
+    ${T('c tới mép trong cọc', `+X ${fx(r.c.xp, 0)}; −X ${fx(r.c.xm, 0)}; +Y ${fx(r.c.yp, 0)}; −Y ${fx(r.c.ym, 0)} mm`)}
+    ${T('Từng mặt tháp', r.faces.map(f => `${f.n}: k = ${fx(f.k, 3)}; w<sub>tb</sub> = ${fx(f.w, 0)} mm; F = ${fx(mat().Rbt * S.tcvn.gb1, 3)}×${fx(r.h0, 0)}×${fx(f.k, 3)}×${fx(f.w, 0)}/1000 = ${fx(f.F, 0)} kN`).join('<br>'))}
+    ${T('F', `N − ΣP cọc dưới chân cột = ${fx(o.N, 1)} − ${fx(r.dV, 1)} = ${fx(r.F, 1)} kN`)}
+    ${T('Fu = ΣF<sub>mặt</sub>', fx(r.Fu, 1) + ' kN')}
+    ${T('Kiểm tra F/Fu', tag(o.ratio))}</div>`;
   if (o.kind === 'shear') {
-    if (o.std === 'EC2') return `<h3>Chi tiết – ${esc(o.obj)}, ${esc(o.combo)}</h3><div class="kv"><b>Mặt cắt</b><span>tại mép cột, b = ${fx(r.b, 0)} mm, d = ${fx(r.d, 0)} mm</span>
-      <b>Cọc phía ngoài</b><span>${r.rows.map(q => `cọc #${q.j + 1}: R = ${fx(q.R, 0)} kN, aᵥ = ${fx(q.av, 0)} mm, β = ${fx(q.beta, 3)}`).join('<br>')}</span>
-      <b>VEd / VEd,red</b><span>${fx(r.V, 1)} / ${fx(r.Vred, 1)} kN (6.2.2(6): tải cách gối ≤ 2d nhân β = aᵥ/2d, aᵥ ≥ 0,5d; aᵥ lấy tới mép cọc + 0,2Φ)</span>
-      <b>VRd,c</b><span>vRd,c = ${fx(r.vRdc, 3)} MPa → ${fx(r.VRdc, 1)} kN</span>
-      <b>VEd ≤ 0,5·b·d·ν·fcd</b><span>${fx(r.V, 1)} ≤ ${fx(r.VRdmax, 1)} kN</span>
-      <b>Kết luận</b><span><span class="tag ${o.ratio <= 1 ? 'ok' : 'ng'}">${fx(o.ratio, 3)}</span> (chưa kể cốt đai – thiên an toàn)</span></div>`;
-    return `<h3>Chi tiết – ${esc(o.obj)}, ${esc(o.combo)}</h3><div class="kv"><b>Mặt cắt</b><span>tại mép cột, b = ${fx(r.b, 0)} mm, h₀ = ${fx(r.d, 0)} mm</span>
-      <b>Tiết diện nghiêng</b><span>${r.rows.map(q => `C = ${fx(q.C, 0)} mm: Q = ${fx(q.Q, 0)}; Qb = ${fx(q.Qb, 0)}; Qsw = ${fx(q.Qsw, 0)} kN → ${fx(q.ratio, 3)}`).join('<br>')}</span>
-      <b>Dải bê tông nghiêng (88)</b><span>Q = ${fx(r.Qall, 0)} ≤ 0,3·Rb·b·h₀ = ${fx(r.Qstrip, 0)} kN → ${fx(r.ratioStrip, 3)}</span>
-      <b>Công thức</b><span>(90) Qb = 1,5·Rbt·b·h₀²/C, 0,5Rbt·b·h₀ ≤ Qb ≤ 2,5Rbt·b·h₀; (91) Qsw = 0,75·qsw·C với h₀ ≤ C ≤ 2h₀; qsw ≥ 0,25Rbt·b (96)</span>
-      <b>Kết luận</b><span><span class="tag ${o.ratio <= 1 ? 'ok' : 'ng'}">${fx(o.ratio, 3)}</span></span></div>`;
+    if (o.std === 'EC2') return head + `<div class="kv">${T('Mặt cắt', `tại mép cột; b = ${fx(r.b, 0)} mm; d = ${fx(r.d, 0)} mm`)}
+      ${T('Cọc phía ngoài mặt cắt', r.rows.map(q => `cọc #${q.j + 1}: R = ${fx(q.R, 0)} kN; aᵥ = ${fx(q.av, 0)} mm; β = aᵥ/2d = ${fx(q.beta, 3)} → β·R = ${fx(q.R * q.beta, 0)} kN`).join('<br>'))}
+      ${T('6.2.2(6)', 'tải đặt trong 0,5d ≤ aᵥ ≤ 2d kể từ mép gối được nhân β = aᵥ/2d; aᵥ lấy tới mép cọc + 0,2Φ<sub>cọc</sub>')}
+      ${T('V<sub>Ed</sub> / V<sub>Ed,red</sub>', `${fx(r.V, 1)} / ${fx(r.Vred, 1)} kN`)}
+      ${T('V<sub>Rd,c</sub> (6.2.a)', `v<sub>Rd,c</sub> = ${fx(r.vRdc, 3)} MPa × b × d = ${fx(r.VRdc, 1)} kN`)}
+      ${T('Kiểm tra', `V<sub>Ed,red</sub>/V<sub>Rd,c</sub> = ${fx(r.Vred / r.VRdc, 3)}; V<sub>Ed</sub> ≤ 0,5·b·d·ν·f<sub>cd</sub> = ${fx(r.VRdmax, 1)} kN → ${fx(r.V / r.VRdmax, 3)}`)}
+      ${T('Kết luận', tag(o.ratio) + ' (chưa kể cốt đai – thiên an toàn)')}</div>`;
+    return head + `<div class="kv">${T('Mặt cắt', `tại mép cột; b = ${fx(r.b, 0)} mm; h₀ = ${fx(r.d, 0)} mm`)}
+      ${T('Công thức', '(89) Q ≤ Qb + Qsw; (90) Qb = φb2·Rbt·b·h₀²/C, φb2 = 1,5, giới hạn 0,5Rbt·b·h₀ ≤ Qb ≤ 2,5Rbt·b·h₀; (91) Qsw = φsw·qsw·C, φsw = 0,75, h₀ ≤ C ≤ 2h₀; qsw ≥ 0,25Rbt·b')}
+      ${T('Tiết diện nghiêng', r.rows.map(q => `C = ${fx(q.C, 0)} mm: Q = ${fx(q.Q, 0)}; Qb = ${fx(q.Qb, 0)}; Qsw = ${fx(q.Qsw, 0)} kN → ${fx(q.ratio, 3)}`).join('<br>'))}
+      ${T('Dải nghiêng (88)', `Q = ${fx(r.Qall, 0)} ≤ 0,3·Rb·b·h₀ = ${fx(r.Qstrip, 0)} kN → ${fx(r.ratioStrip, 3)}`)}
+      ${T('Kết luận', tag(o.ratio))}</div>`;
   }
   if (o.std === 'EC2') {
-    const c = r.crit;
-    return `<h3>Chi tiết – ${esc(o.obj)}, ${esc(o.combo)}</h3><div class="kv">
-      <b>Lực VEd</b><span>${fx(o.N, 1)} kN; Mx = ${fx(o.Mx, 1)}, My = ${fx(o.My, 1)} kNm</span>
-      <b>d tại vùng tải</b><span>${fx(r.d, 0)} mm</span>
-      <b>β tại chu vi tới hạn (6.39/6.51, W tính số)</b><span>${fx(r.beta, 3)}</span>
-      <b>Mặt cột u₀</b><span>u₀ = ${fx(r.u0, 0)} mm; β = ${fx(r.betaU0, 3)}; vEd,0 = ${fx(r.vEd0, 3)} ≤ vRd,max = ${fx(r.vRdmax, 3)} MPa → ${fx(r.ratio0, 3)}</span>
-      <b>Chu vi u₁ (a = 2d)</b><span>${r.u1 > 0 ? fx(r.u1, 0) + ' mm' : 'nằm ngoài đài (đài nhỏ hơn 2d tính từ mép cột)'}</span>
-      ${r.stopA ? `<b>Giới hạn dò</b><span>dừng tại a = ${fx(r.stopA / r.d, 2)}d: chu vi bắt đầu thoát ra mép đài (phá hoại cắt một phương – kiểm tra cắt riêng)</span>` : ''}
-      <b>Chu vi tới hạn</b><span>${esc(c.opt || '')}; a = ${fx(c.a, 0)} mm (${fx(c.a / r.d, 2)}d); u = ${fx(c.u, 0)} mm; d = ${fx(c.d, 0)} mm</span>
-      <b>Lực giảm</b><span>ΔV (cọc trong chu vi) = ${fx(c.dV, 1)} kN; TLBT trong chu vi = ${fx(c.Wt, 1)} kN; VEd,red = ${fx(c.Vred, 1)} kN</span>
-      <b>vEd</b><span>${fx(c.vEd, 3)} MPa</span>
-      ${r.out ? `<b>Chu vi ngoài u<sub>out</sub> (6.4.5(4))</b><span>${r.out.note ? r.out.note : `a = ${fx(r.out.a, 0)} mm; u = ${fx(r.out.u, 0)} mm; vEd = ${fx(r.out.vEd, 3)} ≤ vRd,c = ${fx(r.out.vRd, 3)} MPa → ${fx(r.out.ratio, 3)}`}</span>` : ''}
-      <b>vRd</b><span>${fx(c.vRd, 3)} MPa ${S.opt.enhance ? '(= vRd,c·2d/a)' : '(= vRd,c)'}${c.vRdcs != null ? `; vRd,cs = ${fx(c.vRdcs, 3)} MPa` : ''}</span>
-      <b>Kết luận</b><span><span class="tag ${o.ratio <= 1 ? 'ok' : 'ng'}">${fx(o.ratio, 3)}</span>${r.needLinks ? (S.rb.links.on ? ' – bê tông không đủ, đã kể cốt thép chống chọc thủng' : ' – <b>cần cốt thép chống chọc thủng</b> hoặc tăng chiều dày') : ''}</span></div>
-      <details style="margin-top:8px"><summary style="cursor:pointer">Bảng dò chu vi</summary><div class="tw"><table class="t"><tr><th class="num">a/d</th><th class="num">u (mm)</th><th class="num">VEd,red</th><th class="num">vEd</th><th class="num">vRd</th><th class="num">Tỷ lệ</th></tr>${r.scan.filter((_, i) => i % 2 === 1).map(s => `<tr><td class="num">${fx(s.a / r.d, 2)}</td><td class="num">${fx(s.u, 0)}</td><td class="num">${fx(s.Vred, 0)}</td><td class="num">${fx(s.vEd, 3)}</td><td class="num">${fx(s.vRd, 3)}</td><td class="num">${fx(s.ratio, 3)}</td></tr>`).join('')}</table></div></details>`;
+    const c = r.crit; if (!c) return head + '<p class="note">Không có chu vi hợp lệ.</p>';
+    const rc = c.rc || {}, rho = Math.min(Math.sqrt(asPerM(S.rb.botX) * asPerM(S.rb.botY)) / (1000 * c.d), 0.02);
+    const Myt = (o.My || 0) + c.Vred * ((r.lc ? r.lc[0] : 0) - c.per.cx), Mxt = (o.Mx || 0) + c.Vred * ((r.lc ? r.lc[1] : 0) - c.per.cy);
+    return head + `<div class="kv">
+      ${T('Tải', `V<sub>Ed</sub> = ${fx(o.N, 1)} kN; M<sub>x</sub> = ${fx(o.Mx, 1)}; M<sub>y</sub> = ${fx(o.My, 1)} kNm (không nhân hệ số giảm)`)}
+      ${T('d (trung bình 2 lớp)', `${fx(r.d, 0)} mm tại tâm diện tải`)}
+      ${T('Mặt cột u₀ (6.53)', `u₀ = ${fx(r.u0, 0)} mm; v<sub>Ed,0</sub> = β·V<sub>Ed</sub>/(u₀·d) = ${fx(r.vEd0, 3)} MPa ≤ v<sub>Rd,max</sub> = ${S.ec2.kmax}·ν·f<sub>cd</sub> = ${fx(r.vRdmax, 3)} MPa; ν = 0,6(1 − f<sub>ck</sub>/250) → ${fx(r.ratio0, 3)}`)}
+      ${T('Chu vi u₁ (a = 2d)', r.u1 > 0 ? fx(r.u1, 0) + ' mm' : 'nằm ngoài đài')}
+      ${r.stopA ? T('Giới hạn dò', `dừng tại a = ${fx(r.stopA / r.d, 2)}d: chu vi thoát ra mép đài ngoài phạm vi 6.4.2(4) → phá hoại cắt một phương`) : ''}
+      ${T('Chu vi tới hạn (6.4.4(2))', `${esc(c.opt || '')}; a = ${fx(c.a, 0)} mm = ${fx(c.a / r.d, 2)}d; u = ${fx(c.u, 0)} mm; d<sub>tb</sub> = ${fx(c.d, 0)} mm`)}
+      ${T('V<sub>Ed,red</sub> (6.48)', `V<sub>Ed</sub> − ΔV<sub>Ed</sub> = ${fx(o.N, 1)} − (${fx(c.dV, 1)} − ${fx(c.Wt, 1)}) = ${fx(c.Vred, 1)} kN (ΔV = phản lực cọc trong chu vi − tải mặt đài trong chu vi)`)}
+      ${T('W₁ = ∫|e|dl (6.40)', `theo X: ${fx(c.per.Wx / 1e6, 3)} m²; theo Y: ${fx(c.per.Wy / 1e6, 3)} m² (tính số trên chu vi thực)`)}
+      ${T('M kể vào β', `quanh Y: ${fx(Myt, 1)}; quanh X: ${fx(Mxt, 1)} kNm (M chân cột + V<sub>Ed,red</sub>·độ lệch tâm tới trọng tâm chu vi)`)}
+      ${T('β (6.39/6.51)', `1 + k·(M/V<sub>Ed,red</sub>)·u/W, cộng 2 phương; k theo Bảng 6.1 với c₁/c₂ = ${fx(r.c1x / Math.max(r.c2y, 1e-6), 2)} → β = ${fx(c.beta, 3)}`)}
+      ${T('v<sub>Ed</sub> (6.51)', `β·V<sub>Ed,red</sub>/(u·d) = ${fx(c.beta, 3)}×${fx(c.Vred, 1)}×10³/(${fx(c.u, 0)}×${fx(c.d, 0)}) = ${fx(c.vEd, 3)} MPa`)}
+      ${T('v<sub>Rd,c</sub> (6.47)', `C<sub>Rd,c</sub>·k·(100ρ<sub>l</sub>f<sub>ck</sub>)<sup>1/3</sup> ≥ v<sub>min</sub>; C<sub>Rd,c</sub> = 0,18/γ<sub>c</sub> = ${fx(0.18 / S.ec2.gc, 3)}; k = 1+√(200/d) = ${fx(rc.k, 3)}; ρ<sub>l</sub> = √(ρ<sub>x</sub>ρ<sub>y</sub>) = ${fx(rho * 100, 3)}%; v<sub>min</sub> = 0,035k<sup>1,5</sup>√f<sub>ck</sub> = ${fx(rc.vmin, 3)} → ${fx(rc.v, 3)} MPa`)}
+      ${T('v<sub>Rd</sub> (6.50)', `${S.opt.enhance ? `v<sub>Rd,c</sub>·2d/a = ${fx(rc.v, 3)}×${fx(2 * c.d / c.a, 3)} = ` : ''}${fx(c.vRd, 3)} MPa${c.vRdcs != null ? `; có cốt thép: v<sub>Rd,cs</sub> = 0,75v<sub>Rd</sub> + 1,5ρ<sub>w</sub>f<sub>ywd,ef</sub> = ${fx(c.vRdcs, 3)} MPa (6.52)` : ''}`)}
+      ${r.out ? T('Chu vi ngoài u<sub>out</sub> (6.4.5(4))', r.out.note ? r.out.note : `a = ${fx(r.out.a, 0)} mm; u = ${fx(r.out.u, 0)} mm; v<sub>Ed</sub> = ${fx(r.out.vEd, 3)} ≤ ${fx(r.out.vRd, 3)} MPa → ${fx(r.out.ratio, 3)}`) : ''}
+      ${T('Kết luận', tag(o.ratio) + (r.needLinks ? (S.rb.links.on ? ' – đã kể cốt thép chống chọc thủng' : ' – <b>cần cốt thép chống chọc thủng</b> hoặc tăng chiều dày') : ''))}</div>
+      <details style="margin-top:8px"><summary style="cursor:pointer">Bảng dò chu vi</summary><div class="tw"><table class="t"><tr><th class="num">a/d</th><th>Phương án</th><th class="num">u (mm)</th><th class="num">V<sub>Ed,red</sub></th><th class="num">β</th><th class="num">v<sub>Ed</sub></th><th class="num">v<sub>Rd</sub></th><th class="num">Tỷ lệ</th></tr>${r.scan.filter((_, i) => i % 2 === 1).map(s => `<tr><td class="num">${fx(s.a / r.d, 2)}</td><td>${esc(s.opt)}</td><td class="num">${fx(s.u, 0)}</td><td class="num">${fx(s.Vred, 0)}</td><td class="num">${fx(s.beta, 3)}</td><td class="num">${fx(s.vEd, 3)}</td><td class="num">${fx(s.vRd, 3)}</td><td class="num">${fx(s.ratio, 3)}</td></tr>`).join('')}</table></div></details>`;
   }
-  const c = r.crit;
-  return `<h3>Chi tiết – ${esc(o.obj)}, ${esc(o.combo)}</h3><div class="kv">
-    <b>Lực ngoài</b><span>N = ${fx(o.N, 1)} kN; Mx = ${fx(o.Mx, 1)}, My = ${fx(o.My, 1)} kNm</span>
-    <b>h₀</b><span>${fx(r.h0, 0)} mm</span>
-    <b>Cọc trong đáy tháp (offset h₀)</b><span>ΣP = ${fx(r.dV, 1)} kN; TLBT = ${fx(r.Wt, 1)} kN → F = ${fx(r.F, 1)} kN</span>
-    <b>Đường bao (h₀/2)</b><span>${esc(c.name)}; u = ${fx(c.u, 0)} mm</span>
-    <b>Fb,u = Rbt·u·h₀</b><span>${fx(c.Fbu, 1)} kN${c.linksUsed ? `; Fsw,u = ${fx(c.Fsw, 1)} kN (kể vào tính toán)` : (S.rb.links.on ? '; Fsw,u < 0,25Fb,u → không kể' : '')}</span>
-    <b>Mbx,u / Mby,u</b><span>${fx(c.Mbxu, 1)} / ${fx(c.Mbyu, 1)} kNm</span>
-    <b>M kể vào</b><span>theo X: ${fx(c.Mx, 1)}; theo Y: ${fx(c.My, 1)} kNm (gồm ${S.tcvn.mFactor}·M cột + F·độ lệch tâm)</span>
-    <b>Điều kiện (131)/(132)</b><span>F/Fu = ${fx(c.rF, 3)}; ΣM/Mu = ${fx(c.rM, 3)} (≤ 0,5·F/Fu)</span>
-    ${r.options.length > 1 ? `<b>Các phương án đường bao</b><span>${r.options.map(q => `${esc(q.name)}: u = ${fx(q.u, 0)} mm → ${fx(q.ratio, 3)}`).join('<br>')}</span>` : ''}
-    ${r.out ? `<b>Tiết diện thứ hai</b><span>cách mép tải ${fx(r.out.ext, 0)} + h₀/2 (ngoài vùng cốt thép), F = ${fx(r.out.F, 1)} kN, u = ${fx(r.out.u, 0)} mm, chỉ bê tông → ${fx(r.out.ratio, 3)}</span>` : ''}
-    <b>Kết luận</b><span><span class="tag ${o.ratio <= 1 ? 'ok' : 'ng'}">${fx(o.ratio, 3)}</span></span></div>`;
+  // ---- TCVN 5574:2018 8.1.6 ----
+  if (r.na) return head + `<div class="kv">${T('Kết quả', '<span class="tag wr">Không áp dụng 8.1.6</span>')}${T('Lý do', `mọi phương án đường bao cách mép tải h₀/2 = ${fx(r.h0 / 2, 0)} mm (khép kín, ra 1 mép, ra góc) đều thoát ra ngoài đài qua mép khác → tháp chọc thủng trùm hết đài. Kiểm tra bằng tiết diện nghiêng (8.1.3) và/hoặc tháp tới mép trong cọc.`)}</div>`;
+  const c = r.crit, Rbt = mat().Rbt * S.tcvn.gb1;
+  const optRow = q => `${esc(q.name)}: u = ${fx(q.u, 0)} mm; F/Fu = ${fx(q.rF, 3)}; ΣM/Mu = ${fx(q.rM, 3)} → ${fx(q.ratio, 3)}`;
+  return head + `<div class="kv">
+    ${T('Tải tại chân cột', `N = ${fx(o.N, 1)} kN; M<sub>x</sub> (quanh X) = ${fx(o.Mx, 1)}; M<sub>y</sub> (quanh Y) = ${fx(o.My, 1)} kNm`)}
+    ${T('h₀', `${fx(r.h0, 0)} mm (trung bình 2 lớp thép dưới)`)}
+    ${T('Lực chọc thủng F', S.opt.reduce ? `N − ΣP cọc có tâm trong đáy tháp (offset h₀) + q·A = ${fx(o.N, 1)} − ${fx(r.dV, 1)} + ${fx(r.Wt, 1)} = ${fx(r.F, 1)} kN` : `F = N = ${fx(r.F, 1)} kN (không trừ phản lực cọc)`)}
+    ${T('Phương án đường bao (8.1.6.2)', r.options.map(optRow).join('<br>') + '<br><i>lấy phương án có khả năng chịu nhỏ nhất (tỷ lệ lớn nhất)</i>')}
+    ${T('Đường bao quyết định', `${esc(c.name)}; u = ${fx(c.u, 0)} mm`)}
+    ${T('Trọng tâm đường bao (135)', `x₀ = ${fx(c.cx, 3)} m; y₀ = ${fx(c.cy, 3)} m; độ lệch tâm diện tải e<sub>x</sub> = ${fx(c.ex * 1000, 0)} mm, e<sub>y</sub> = ${fx(c.ey * 1000, 0)} mm`)}
+    ${T('F<sub>b,u</sub> = R<sub>bt</sub>·A<sub>b</sub> (130)', `A<sub>b</sub> = u·h₀ = ${fx(c.u, 0)}×${fx(c.h0, 0)} = ${fx(c.u * c.h0 / 1e6, 3)} m²; F<sub>b,u</sub> = ${fx(Rbt, 3)}×${fx(c.u * c.h0, 0)}/1000 = ${fx(c.Fbu, 1)} kN`)}
+    ${T('I<sub>bx</sub>, I<sub>by</sub> (134)', `I<sub>bx</sub> = Σ∫(x−x₀)²dl = ${fx(c.Ix / 1e9, 4)} m³; I<sub>by</sub> = Σ∫(y−y₀)²dl = ${fx(c.Iy / 1e9, 4)} m³ (đường bao rộng đơn vị)`)}
+    ${T('W<sub>bx</sub>, W<sub>by</sub>', `W<sub>bx</sub> = I<sub>bx</sub>/x<sub>max</sub> = ${fx(c.Ix / 1e9, 4)}/${fx(c.xmax / 1000, 3)} = ${fx(c.Wbx / 1e6, 4)} m²; W<sub>by</sub> = I<sub>by</sub>/y<sub>max</sub> = ${fx(c.Iy / 1e9, 4)}/${fx(c.ymax / 1000, 3)} = ${fx(c.Wby / 1e6, 4)} m²`)}
+    ${T('M<sub>bx,u</sub>, M<sub>by,u</sub> (133)', `R<sub>bt</sub>·W<sub>bx</sub>·h₀ = ${fx(c.Mbxu, 1)} kNm; R<sub>bt</sub>·W<sub>by</sub>·h₀ = ${fx(c.Mbyu, 1)} kNm`)}
+    ${T('M theo phương X', `${S.tcvn.mFactor}·M<sub>y</sub> + F·e<sub>x</sub> = ${fx(c.MxCol, 1)} + ${fx(c.MxFe, 1)} → |M| = ${fx(c.Mx, 1)} kNm`)}
+    ${T('M theo phương Y', `${S.tcvn.mFactor}·M<sub>x</sub> + F·e<sub>y</sub> = ${fx(c.MyCol, 1)} + ${fx(c.MyFe, 1)} → |M| = ${fx(c.My, 1)} kNm`)}
+    ${c.linksUsed ? T('Cốt thép ngang (8.1.6.3)', `q<sub>sw</sub> = R<sub>sw</sub>·A<sub>sw</sub>/s<sub>w</sub>; F<sub>sw,u</sub> = 0,8q<sub>sw</sub>·u = ${fx(c.Fsw, 1)} kN (≥ 0,25F<sub>b,u</sub>); M<sub>sw,u</sub> = 0,8q<sub>sw</sub>·W<sub>sw</sub>; tổng không quá 2 lần phần bê tông`) : (S.rb.links.on ? T('Cốt thép ngang', 'F<sub>sw,u</sub> < 0,25F<sub>b,u</sub> → không kể') : '')}
+    ${T('Điều kiện (131)/(137)', `F/F<sub>u</sub> + M<sub>x</sub>/M<sub>bx,u</sub> + M<sub>y</sub>/M<sub>by,u</sub> ≤ 1: ${fx(c.rF, 3)} + ${fx(c.rMraw, 3)}${c.rMraw > c.rM + 1e-9 ? ` → phần mô men lấy ≤ 0,5F/F<sub>u</sub> = ${fx(c.rM, 3)}` : ''} = ${fx(c.ratio, 3)}`)}
+    ${r.out ? T('Tiết diện thứ hai', `cách mép tải ${fx(r.out.ext, 0)} + h₀/2, ngoài vùng cốt thép, F = ${fx(r.out.F, 1)} kN, u = ${fx(r.out.u, 0)} mm, chỉ bê tông → ${fx(r.out.ratio, 3)}`) : ''}
+    ${T('Kết luận', tag(o.ratio))}</div>`;
 }
-
 // ================= SETTLEMENT =================
 function soilLayers() { let top = +S.soil.zGround; return S.soil.layers.map(L => { const o = { ...L, top, bot: top - (+L.thk) }; top = o.bot; return o; }); }
 function zCap() { const z = mainZone(); return S.soil.zCapAuto && z ? (+z.top - +z.h) : +S.soil.zCap; }
@@ -1375,6 +1408,12 @@ DERIVED.settle = () => {
   ${sp.type === 'long' ? `<b>χ, λ₁, β′, α′</b><span>${fx(sp.chi, 4)}; ${fx(sp.lam1, 4)}; ${fx(sp.bp, 4)}; ${fx(sp.ap, 4)}</span><b>β (31)</b><span>${fx(sp.beta, 4)}</span>` : `<b>ζ′</b><span>${fx(sp.zeta, 4)}</span>`}
   <b>s cọc đơn với tải trung bình ${fx(R.N / R.n, 0)} kN</b><span>${mm(sp.flex * R.N / R.n / 1000)} mm</span>
   ${sp.warn.length ? `<b>Lưu ý</b><span class="tag wr">${sp.warn.join('; ')}</span>` : ''}</div>`;
+  const segT = (z1, z2) => R.layers.map(L => { const t = Math.min(L.top, z1) - Math.max(L.bot, z2); if (t <= 1e-9) return null; const G_ = S.soil.gMode === '0.4E' ? 0.4 * L.E : L.E / (2 * (1 + L.nu)); return { n: L.name, a: Math.min(L.top, z1), b: Math.max(L.bot, z2), t, E: L.E, nu: L.nu, G: G_ }; }).filter(Boolean);
+  const tbl = (rows, lab) => { const T = rows.reduce((s, r) => s + r.t, 0), Gm = rows.reduce((s, r) => s + r.G * r.t, 0) / T, nm = rows.reduce((s, r) => s + r.nu * r.t, 0) / T;
+    return `<table class="t"><tr><th>Lớp</th><th class="num">Từ cao độ</th><th class="num">Đến</th><th class="num">Dày h (m)</th><th class="num">E₀ (MPa)</th><th class="num">ν</th><th class="num">G = ${S.soil.gMode === '0.4E' ? '0,4E₀' : 'E₀/2(1+ν)'} (MPa)</th><th class="num">G·h</th></tr>${rows.map(r => `<tr><td>${esc(r.n)}</td><td class="num">${fx(r.a, 2)}</td><td class="num">${fx(r.b, 2)}</td><td class="num">${fx(r.t, 2)}</td><td class="num">${fx(r.E, 2)}</td><td class="num">${fx(r.nu, 3)}</td><td class="num">${fx(r.G, 3)}</td><td class="num">${fx(r.G * r.t, 2)}</td></tr>`).join('')}<tr><td colspan="3"><b>${lab} = ΣG·h/Σh</b></td><td class="num"><b>${fx(T, 2)}</b></td><td></td><td class="num"><b>ν = ${fx(nm, 3)}</b></td><td class="num"><b>${fx(Gm, 3)}</b></td><td></td></tr></table>`; };
+  h += `<details><summary style="cursor:pointer">Bảng tính G₁ (đáy đài ${fx(R.zc, 2)} → mũi ${fx(R.zt, 2)}) và G₂ (mũi → ${fx(R.zt - 0.5 * sp.L, 2)} = L đến 1,5L)</summary>${tbl(segT(R.zc, R.zt), 'G₁')}${tbl(segT(R.zt, R.zt - 0.5 * sp.L), 'G₂')}
+    <p class="note">7.4.2.2: G₁, ν₁ lấy trung bình theo chiều dày trong phạm vi chiều dài cọc; G₂, ν₂ trong phạm vi 0,5L dưới mũi. EA = E<sub>cọc</sub>·A = ${fx(sp.EA, 1)} MN.</p></details>`;
+  h += `<details><summary style="cursor:pointer">Đối chiếu với file Excel tính lún cũ</summary><p class="note">Cùng số liệu D = 0,6 m, L = 32 m, G₁ = 20,93 MPa, G₂ = 39,00 MPa, EA = 9709 MN, app cho s = 19,873 mm với N = 10.032 kN – trùng file Excel. Chênh lệch ở phần nhóm cọc do file Excel: (1) dùng toàn bộ 10.032 kN làm tải “cọc đơn” trong công thức (38), trong khi (38) phải dùng N<sub>d,SLS,i</sub> của từng cọc; (2) công thức (37) thiếu số 2 ở mẫu: đúng là k<sub>ν</sub>G₁L/(<b>2</b>G₂a) → δ = 0,313 chứ không phải 0,431.</p></details>`;
   const sk = R.known.map(k => k.total), dmax = Math.max(...sk);
   if (R.showGroup) h += `<h3>Nhóm cọc (7.4.3)${R.n > 25 ? ' – <span class="tag wr">chọn tay, n > 25 vượt phạm vi nhóm nhỏ của 7.4.1</span>' : ''}</h3>
   <p class="note">δ theo (37): 0,17·ln[kν·G₁L/(2G₂a)]. Tải từng cọc lấy theo phân phối đài cứng tĩnh học (bảng) và theo lời giải đài tuyệt đối cứng có tương tác (lún bằng nhau).</p>
@@ -1688,7 +1727,7 @@ function planSvg(opt = {}) {
   Z.forEach(z => { o += `<polygon points="${P(z.pts)}" fill="${z.pit ? '#EDE6F7' : '#EEF1F0'}" stroke="${z.pit ? '#7E5DB8' : '#333'}" stroke-width="${z.pit ? 1.2 : 1.6}" ${z.pit ? 'stroke-dasharray="6 3"' : ''}/>`;
     if (z.pit) { const x0 = Math.min(...z.pts.map(p => p[0])), y0 = Math.min(...z.pts.map(p => p[1])); o += `<text x="${X(x0) + 4}" y="${Y(y0) - 5}" fill="#7E5DB8" font-size="10.5">${esc(z.name)} h=${z.h} m</text>`; } });
   S.areaLoads.forEach(L => { if (L.pts && L.pts.length >= 3) o += `<polygon points="${P(L.pts)}" fill="url(#hq)" stroke="#D98A2B" stroke-dasharray="3 3"/>`; });
-  if (opt.perim) { const r = opt.perim; if (r.crit && r.crit.poly) o += `<polygon points="${P(r.crit.poly)}" fill="rgba(31,111,208,.06)" stroke="#1F6FD0" stroke-width="2" stroke-dasharray="8 4"/>`; if (r.line) o += `<polyline points="${P(r.line.map(p => [Math.max(Math.min(p[0], bb[2] + 0.3), bb[0] - 0.3), Math.max(Math.min(p[1], bb[3] + 0.3), bb[1] - 0.3)]))}" stroke="#C0392B" stroke-width="2" stroke-dasharray="9 4" fill="none"/>`; }
+  if (opt.perim) { const r = opt.perim, sg = critSegs(r); if (sg) segPaths(sg).forEach(Q => o += `<polyline points="${P(Q)}" fill="none" stroke="#1F6FD0" stroke-width="2.2" stroke-dasharray="8 4"/>`); else if (r.crit && r.crit.poly) o += `<polygon points="${P(r.crit.poly)}" fill="rgba(31,111,208,.06)" stroke="#1F6FD0" stroke-width="2" stroke-dasharray="8 4"/>`; if (r.line) o += `<polyline points="${P(r.line.map(p => [Math.max(Math.min(p[0], bb[2] + 0.3), bb[0] - 0.3), Math.max(Math.min(p[1], bb[3] + 0.3), bb[1] - 0.3)]))}" stroke="#C0392B" stroke-width="2" stroke-dasharray="9 4" fill="none"/>`; }
   const inSet = opt.perim && opt.perim.pilesIn ? new Set(opt.perim.pilesIn) : new Set();
   S.cols.forEach(c => { const Pc = colPoly(c); o += `<polygon points="${P(Pc)}" fill="#F6E7A6" stroke="#9C7F12" stroke-width="1.4"/>`; const cc = G.centroid(G.ccw(G.hull(Pc))); o += `<text x="${X(cc[0])}" y="${Y(cc[1]) + 4}" text-anchor="middle" font-weight="700" fill="#6B560A">${esc(c.name)}</text>`; });
   S.piles.forEach((p, i) => { const r = S.pile.D / 2 * sc, x = X(p.x), y = Y(p.y), col = inSet.has(i) ? '#2E9E4F' : '#B0413E';
@@ -1900,59 +1939,79 @@ function parseDXF(text) {
   return { units, ents: out };
 }
 // ACIS trong DXF (R2000–R2010) được mã hóa: mỗi ký tự khác khoảng trắng → chr(159 − mã)
+// Đọc theo cấu trúc bản ghi: edge → vertex → point; curve = straight-curve / ellipse-curve
 function satShape(enc) {
   if (!enc) return null;
-  const sat = enc.split('\n').map(line => [...line].map(ch => ch === ' ' ? ' ' : String.fromCharCode(159 - ch.charCodeAt(0))).join('')).join('\n');
-  const txt = /ellipse-curve|straight-curve|point/.test(sat) ? sat : enc; // có bản DXF lưu ACIS không mã hóa
-  const toks = txt.split(/\s+/);
-  for (let k = 0; k < toks.length; k++) if (toks[k] === 'ellipse-curve') {
-    const nums = []; for (let m = k + 1; m < toks.length && toks[m] !== '#'; m++) { if (toks[m].startsWith('$') || /^[A-Za-z]/.test(toks[m])) continue; const v = parseFloat(toks[m]); if (!isNaN(v)) nums.push(v); }
-    for (let s = 0; s + 9 < nums.length; s++) { const n = Math.hypot(nums[s + 3], nums[s + 4], nums[s + 5]), mj = Math.hypot(nums[s + 6], nums[s + 7], nums[s + 8]); if (Math.abs(n - 1) < 1e-6 && mj > 0) return { shape: 'circle', c: [nums[s], nums[s + 1]], r: mj }; }
+  const dec = enc.split('\n').map(line => [...line].map(ch => ch === ' ' ? ' ' : String.fromCharCode(159 - ch.charCodeAt(0))).join('')).join('\n');
+  const txt = /\bedge\b|ellipse-curve|straight-curve/.test(dec) ? dec : enc;
+  const lines = txt.split('\n'); let k = 0; while (k < lines.length && !/^(-?\d+\s+)?body\b/.test(lines[k].trim())) k++;
+  const recs = lines.slice(k).join(' ').split('#').map(r => r.trim().split(/\s+/)).filter(t => t.length && t[0] !== '').map(t => /^-\d+$/.test(t[0]) ? t.slice(1) : t);
+  const ref = t => t.startsWith('$') ? parseInt(t.slice(1), 10) : -1;
+  const nums = t => t.filter(x => !x.startsWith('$') && !/^[A-Za-z@]/.test(x)).map(parseFloat).filter(v => !isNaN(v));
+  const pointOf = vi => { const v = recs[vi]; if (!v || v[0] !== 'vertex') return null; const pr = v.slice(1).map(ref).filter(q => q >= 0 && recs[q] && recs[q][0] === 'point'); if (!pr.length) return null; const n = nums(recs[pr[0]].slice(1)); return n.length >= 3 ? [n[n.length - 3], n[n.length - 2]] : null; };
+  const ellipse = ci => { const n = nums(recs[ci].slice(1)); for (let s = 0; s + 9 < n.length; s++) { const nn = Math.hypot(n[s + 3], n[s + 4], n[s + 5]), mj = Math.hypot(n[s + 6], n[s + 7], n[s + 8]); if (Math.abs(nn - 1) < 1e-6 && mj > 0) return { c: [n[s], n[s + 1]], r: mj }; } return null; };
+  const segs = []; let circle = null;
+  recs.forEach(r => { if (r[0] !== 'edge') return; const rs = r.slice(1).map(ref).filter(q => q >= 0 && recs[q]);
+    const vs = rs.filter(q => recs[q][0] === 'vertex'), cv = rs.find(q => /-curve$/.test(recs[q][0])); if (!vs.length) return;
+    const p1 = pointOf(vs[0]), p2 = pointOf(vs[1] != null ? vs[1] : vs[0]); if (!p1 || !p2) return;
+    if (cv != null && recs[cv][0] === 'ellipse-curve') { const el = ellipse(cv); if (el && Math.hypot(p1[0] - p2[0], p1[1] - p2[1]) < 1e-6 * Math.max(1, el.r)) { circle = el; return; }
+      if (el) { // cung tròn: chia 8 đoạn theo chiều ngắn nhất (gần đúng biên)
+        const a1 = Math.atan2(p1[1] - el.c[1], p1[0] - el.c[0]); let a2 = Math.atan2(p2[1] - el.c[1], p2[0] - el.c[0]); let da = a2 - a1; while (da > Math.PI) da -= 2 * Math.PI; while (da < -Math.PI) da += 2 * Math.PI;
+        let prev = p1; for (let s = 1; s <= 8; s++) { const an = a1 + da * s / 8, q = s === 8 ? p2 : [el.c[0] + el.r * Math.cos(an), el.c[1] + el.r * Math.sin(an)]; segs.push([prev, q]); prev = q; } return; } }
+    segs.push([p1, p2]); });
+  if (circle && !segs.length) return { shape: 'circle', c: circle.c, r: circle.r };
+  if (segs.length >= 3) { // nối các cạnh thành vòng kín, lấy vòng có diện tích lớn nhất
+    const key = p => p[0].toFixed(4) + ',' + p[1].toFixed(4), used = new Array(segs.length).fill(false), loops = [];
+    for (let s0 = 0; s0 < segs.length; s0++) { if (used[s0]) continue; used[s0] = true; const loop = [segs[s0][0], segs[s0][1]]; let grow = true;
+      while (grow) { grow = false; const endK = key(loop[loop.length - 1]); for (let t = 0; t < segs.length; t++) { if (used[t]) continue; if (key(segs[t][0]) === endK) { loop.push(segs[t][1]); used[t] = true; grow = true; break; } if (key(segs[t][1]) === endK) { loop.push(segs[t][0]); used[t] = true; grow = true; break; } } }
+      if (key(loop[0]) === key(loop[loop.length - 1])) loop.pop(); if (loop.length >= 3) loops.push(loop); }
+    if (loops.length) { const P = loops.sort((p, q) => Math.abs(G.area(q)) - Math.abs(G.area(p)))[0], xs = P.map(p => p[0]), ys = P.map(p => p[1]);
+      return { shape: 'poly', pts: P, c: [(Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2], w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) }; }
   }
-  const pts = []; for (let k = 0; k < toks.length; k++) if (toks[k] === 'point') { const nums = []; for (let m = k + 1; m < toks.length && toks[m] !== '#'; m++) { if (toks[m].startsWith('$')) continue; const v = parseFloat(toks[m]); if (!isNaN(v)) nums.push(v); } if (nums.length >= 3) pts.push([nums[nums.length - 3], nums[nums.length - 2]]); }
-  if (pts.length >= 3) { const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]); return { shape: 'poly', pts: G.hull(pts), c: [(Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2], w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) }; }
+  if (circle) return { shape: 'circle', c: circle.c, r: circle.r };
   return null;
 }
-function dxfLayers(d) { const m = {}; d.ents.forEach(e => { const k = e.layer; m[k] = m[k] || { poly: 0, circle: 0, region: 0, fail: 0 }; if (e.kind === 'poly' && e.closed) m[k].poly++; if (e.kind === 'circle') m[k].circle++; if (e.kind === 'region') e.fail ? m[k].fail++ : m[k].region++; }); return m; }
+function dxfLayers(d) { const m = {}; d.ents.forEach(e => { const k = e.layer; m[k] = m[k] || { poly: 0, circle: 0, rc: 0, rp: 0, fail: 0 }; if (e.kind === 'poly' && e.closed) m[k].poly++; if (e.kind === 'circle') m[k].circle++; if (e.kind === 'region') e.fail ? m[k].fail++ : (e.shape === 'circle' ? m[k].rc++ : m[k].rp++); }); return m; }
 function dxfBox() {
   if (!dxfData) return '';
   const lay = dxfLayers(dxfData), names = Object.keys(lay).sort();
-  const guess = (f) => names.find(n => f(lay[n], n)) || '';
-  const u = dxfData.units, scDef = u === 6 ? 1 : u === 5 ? 0.01 : u === 4 ? 0.001 : 0.001;
-  if (dxfData.capL == null) { dxfData.capL = guess((v, n) => /dai|đài|cap|mong|móng/i.test(n) && v.poly) || guess(v => v.poly); dxfData.pileL = guess((v, n) => /coc|cọc|pile/i.test(n) && (v.region || v.circle)) || guess(v => v.region || v.circle); dxfData.colL = guess((v, n) => /cot|cột|col|vach|vách|loi|lõi/i.test(n) && v.poly); dxfData.sc = scDef; }
-  const opt = sel => `<option value="">— không —</option>` + names.map(n => `<option ${n === sel ? 'selected' : ''}>${esc(n)}</option>`).join('');
-  const fails = names.reduce((s, n) => s + lay[n].fail, 0);
+  const u = dxfData.units, scDef = u === 6 ? 1 : u === 5 ? 0.01 : 0.001;
+  if (dxfData.sc == null) dxfData.sc = scDef;
+  const opt = `<option value="">Tất cả layer</option>` + names.map(n => `<option>${esc(n)}</option>`).join('');
+  const fails = names.reduce((s, n) => s + lay[n].fail, 0), tot = k => names.reduce((s, n) => s + lay[n][k], 0);
   return `<div class="box" id="dxfBox"><b>Nhập DXF: ${esc(dxfData.name)}</b>
-  <div class="tw" style="max-height:170px;margin-top:6px"><table class="t"><tr><th>Layer</th><th class="num">Polyline kín</th><th class="num">Region</th><th class="num">Circle</th></tr>${names.map(n => `<tr><td>${esc(n)}</td><td class="num">${lay[n].poly}</td><td class="num">${lay[n].region}${lay[n].fail ? ` <span class="tag wr">${lay[n].fail} lỗi</span>` : ''}</td><td class="num">${lay[n].circle}</td></tr>`).join('')}</table></div>
-  <div class="grid3" style="margin-top:6px"><label class="fld">Layer đài (polyline kín)<select id="dxCap">${opt(dxfData.capL)}</select></label><label class="fld">Layer cọc (region / circle)<select id="dxPile">${opt(dxfData.pileL)}</select></label><label class="fld">Layer cột, vách (polyline kín)<select id="dxCol">${opt(dxfData.colL)}</select></label>
+  <p class="note" style="margin:4px 0">Phân loại theo đối tượng: <b>polyline kín → đài</b> (lớn nhất là đài chính, nằm trong → hố pit); <b>region/circle tròn → cọc</b>; <b>region đa giác → cột/lõi</b> (chữ nhật → cột CN, hình khác → lõi, giữ nguyên hình lõm L, U).</p>
+  <div class="tw" style="max-height:160px"><table class="t"><tr><th>Layer</th><th class="num">Polyline kín</th><th class="num">Region tròn</th><th class="num">Region đa giác</th><th class="num">Circle</th></tr>${names.map(n => `<tr><td>${esc(n)}</td><td class="num">${lay[n].poly}</td><td class="num">${lay[n].rc}</td><td class="num">${lay[n].rp}${lay[n].fail ? ` <span class="tag wr">${lay[n].fail} lỗi</span>` : ''}</td><td class="num">${lay[n].circle}</td></tr>`).join('')}
+  <tr><td><b>Tổng</b></td><td class="num"><b>${tot('poly')}</b></td><td class="num"><b>${tot('rc')}</b></td><td class="num"><b>${tot('rp')}</b></td><td class="num"><b>${tot('circle')}</b></td></tr></table></div>
+  <div class="grid3" style="margin-top:6px"><label class="fld">Lọc layer đài<select id="dxCap">${opt}</select></label><label class="fld">Lọc layer cọc<select id="dxPile">${opt}</select></label><label class="fld">Lọc layer cột/lõi<select id="dxCol">${opt}</select></label>
   <label class="fld">Đơn vị bản vẽ<select id="dxSc"><option value="0.001" ${dxfData.sc === 0.001 ? 'selected' : ''}>mm</option><option value="0.01" ${dxfData.sc === 0.01 ? 'selected' : ''}>cm</option><option value="1" ${dxfData.sc === 1 ? 'selected' : ''}>m</option></select></label>
   <label class="fld">Chiều dày đài mặc định (m)<input id="dxH" type="number" step="0.1" value="${mainZone() ? mainZone().h : 1.5}"></label>
   <label class="fld">Gốc tọa độ<select id="dxO"><option value="c">Dời về tâm đài</option><option value="k">Giữ tọa độ CAD</option></select></label></div>
-  ${fails ? `<p class="note"><span class="tag wr">Lưu ý</span> ${fails} region không đọc được – thường do lưu DXF bản 2013 trở lên (dữ liệu ACIS nhị phân). Lưu lại bằng “DXF 2010” hoặc cũ hơn, hoặc dùng CIRCLE cho cọc.</p>` : ''}
-  <div class="row"><button class="btn primary sm" data-a="dxfGo">Dựng mặt bằng (thay hình học hiện tại)</button><button class="btn sm" data-a="dxfCancel">Hủy</button></div>
-  <p class="note">Dựng cơ bản: mỗi polyline kín trên layer đài thành 1 vùng đài (vùng lớn nhất là đài chính, vùng nằm trong làm hố pit); region/circle thành cọc; polyline cột thành cột chữ nhật hoặc lõi. Tải trọng giữ nguyên; chỉnh chiều dày, cao độ, tên sau.</p></div>`;
+  ${fails ? `<p class="note"><span class="tag wr">Lưu ý</span> ${fails} region không đọc được – thường do lưu DXF 2013 trở lên (ACIS nhị phân). Lưu lại “AutoCAD 2010 DXF” hoặc cũ hơn.</p>` : ''}
+  <div class="row"><button class="btn primary sm" data-a="dxfGo">Dựng mặt bằng (thay hình học hiện tại)</button><button class="btn sm" data-a="dxfCancel">Hủy</button></div></div>`;
 }
 ACT.dxfCancel = () => { dxfData = null; renderPanel(); };
 ACT.dxfGo = () => {
   const capL = $('#dxCap').value, pileL = $('#dxPile').value, colL = $('#dxCol').value, sc = +$('#dxSc').value, h = +$('#dxH').value || 1.5, org = $('#dxO').value;
-  const E = dxfData.ents, P = pts => pts.map(p => [p[0] * sc, p[1] * sc]);
-  let caps = E.filter(e => e.kind === 'poly' && e.closed && e.layer === capL && e.pts.length >= 3).map(e => P(e.pts));
-  const piles = []; E.filter(e => e.layer === pileL && (e.kind === 'circle' || (e.kind === 'region' && !e.fail))).forEach(e => {
-    if (e.kind === 'circle' || e.shape === 'circle') piles.push({ x: e.c[0] * sc, y: e.c[1] * sc, D: 2 * e.r * sc, shape: 'circle' });
-    else piles.push({ x: e.c[0] * sc, y: e.c[1] * sc, D: Math.max(e.w, e.h) * sc, shape: Math.abs(e.w - e.h) < 0.02 * e.w ? 'square' : 'square' }); });
-  const cols = E.filter(e => e.kind === 'poly' && e.closed && e.layer === colL && e.pts.length >= 3).map(e => P(e.pts));
-  if (!caps.length && !piles.length) { toast('Không có đài hoặc cọc trên layer đã chọn'); return; }
+  const E = dxfData.ents, P = pts => pts.map(p => [p[0] * sc, p[1] * sc]), onL = (e, L) => !L || e.layer === L;
+  let caps = E.filter(e => e.kind === 'poly' && e.closed && e.pts.length >= 3 && onL(e, capL)).map(e => P(e.pts));
+  const piles = []; E.filter(e => onL(e, pileL) && (e.kind === 'circle' || (e.kind === 'region' && !e.fail && e.shape === 'circle'))).forEach(e => piles.push({ x: e.c[0] * sc, y: e.c[1] * sc, D: 2 * e.r * sc, shape: 'circle' }));
+  // region đa giác vuông nhỏ trên layer cọc (khi lọc riêng) → cọc vuông; còn lại → cột/lõi
+  const regPoly = E.filter(e => e.kind === 'region' && !e.fail && e.shape === 'poly');
+  const cols = [];
+  regPoly.forEach(e => { const sq = Math.abs(e.w - e.h) < 0.02 * e.w && e.pts.length === 4 && Math.abs(Math.abs(G.area(e.pts)) - e.w * e.h) < 1e-3 * e.w * e.h;
+    if (pileL && e.layer === pileL && sq) piles.push({ x: e.c[0] * sc, y: e.c[1] * sc, D: e.w * sc, shape: 'square' }); else if (onL(e, colL)) cols.push(P(e.pts)); });
+  if (!caps.length && !piles.length) { toast('Không có đài (polyline kín) hoặc cọc (region/circle tròn)'); return; }
   let dx = 0, dy = 0; if (org === 'c' && caps.length) { const big = caps.slice().sort((a, b) => Math.abs(G.area(b)) - Math.abs(G.area(a)))[0], c = G.centroid(G.ccw(big)); dx = -c[0]; dy = -c[1]; }
   const mv = p => [r3(p[0] + dx), r3(p[1] + dy)];
   caps.sort((a, b) => Math.abs(G.area(b)) - Math.abs(G.area(a)));
   const top = mainZone() ? +mainZone().top : 0;
   S.zones = caps.map((pts, i) => { const inner = i > 0 && G.inside(G.centroid(G.ccw(pts)), caps[0]); return { id: uid(), name: i === 0 ? 'Đài chính' : inner ? 'Hố pit ' + i : 'Đài ' + (i + 1), pts: pts.map(mv), h, top: inner ? top - 0.6 : top, pit: inner }; });
-  if (piles.length) { const Ds = piles.map(p => p.D).sort((a, b) => a - b); S.pile.D = r3(Ds[Math.floor(Ds.length / 2)]); S.pile.shape = piles[0].shape; }
+  if (piles.length) { const Ds = piles.map(p => p.D).sort((a, b) => a - b); S.pile.D = r3(Ds[Math.floor(Ds.length / 2)]); S.pile.shape = piles.filter(p => p.shape === 'square').length > piles.length / 2 ? 'square' : 'circle'; }
   piles.sort((a, b) => (b.y - a.y) || (a.x - b.x)); S.piles = piles.map((p, i) => { const q = mv([p.x, p.y]); return { id: 'P' + (i + 1), x: q[0], y: q[1] }; });
   S.cols = cols.map((pts, i) => { const Q = pts.map(mv), xs = Q.map(p => p[0]), ys = Q.map(p => p[1]), bx = Math.max(...xs) - Math.min(...xs), by = Math.max(...ys) - Math.min(...ys);
     const isRect = Q.length === 4 && Math.abs(Math.abs(G.area(Q)) - bx * by) < 1e-4 * bx * by;
     return isRect ? { id: uid(), name: 'C' + (i + 1), type: 'rect', x: r3((Math.min(...xs) + Math.max(...xs)) / 2), y: r3((Math.min(...ys) + Math.max(...ys)) / 2), bx: r3(bx), by: r3(by), D: 0, pts: [] } : { id: uid(), name: 'Lõi ' + (i + 1), type: 'poly', x: 0, y: 0, bx: 0, by: 0, D: 0, pts: Q }; });
-  // dời điểm lực cũ về tâm cột mới nếu số cột khớp
   dxfData = null; changed(); fit(); draw(); toast(`Đã dựng ${S.zones.length} vùng đài, ${S.piles.length} cọc, ${S.cols.length} cột/lõi`);
 };
 function openDXF(file) { const rd = new FileReader(); rd.onload = () => { try { const d = parseDXF(rd.result); d.name = file.name; if (!d.ents.length) throw new Error('không có đối tượng'); dxfData = d; setTab('geo'); } catch (e) { toast('Không đọc được DXF: ' + e.message); } }; rd.readAsText(file); }
